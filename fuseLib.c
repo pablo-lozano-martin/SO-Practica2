@@ -1,6 +1,3 @@
-//Práctica 2 - Pablo Lozano Martín, Gonzalo Contreras Gordo y Pablo Magno Pezo Ortiz
-
-
 #include "fuseLib.h"
 
 #include <stdio.h>
@@ -477,89 +474,92 @@ static int my_truncate(const char *path, off_t size)
     return 0;
 }
 
-static int my_unlink(const char *path){ // Borra un fichero en la dirección path
+//borra y libera el espacio que ocupa un fichero
+static int my_unlink(const char *path)  //path: direccion del fichero a borrar
+{
+	int fileID;
 
-    int idxDir;
-
-    // The directory exists
-    if(idxDir = findFileByName(&myFileSystem, (char *)path + 1) != -1)
+	// The directory exists
+    if((fileID = findFileByName(&myFileSystem, (char *)path + 1)) == -1)    //Guarda el ID del fichero buscado
         return -EEXIST;
-        
-    // Actualiza los datos de los nodos y ficheros
-    myFileSystem.numFreeNodes++;
-    myFileSystem.directory.numFiles--;
 
-    int idxNodo = myFileSystem.directory.files[idxDir].nodeIdx;
+    myFileSystem.directory.files[fileID].freeFile = true;   //Indica que esta libre
+    myFileSystem.directory.numFiles--;  //Resta el numero de ficheros del directorio
+    myFileSystem.numFreeNodes++;    //Aumenta el numero de nodos disponibles
 
-    myFileSystem.nodes[idxNodo]->freeNode = true; // Deja libre el nodo
+    int node_id = myFileSystem.directory.files[fileID].nodeIdx;  //almacena el i-nodo del fichero
+    myFileSystem.nodes[node_id]->freeNode = true;    //indica que el i-nodo esta libre
 
-    int block;
-    int i = 0;
+    int bloque;
 
-    while (i < MAX_BLOCKS_PER_FILE)
+    for(int i = 0; i < MAX_BLOCKS_PER_FILE; i++)    //recorre y libera los bloques que ocupa el fichero a eliminar
     {
-        if((block = myFileSystem.nodes[idxNodo]->blocks[i]) != 0)
+    	if((bloque = myFileSystem.nodes[node_id]->blocks[i]) != 0)
         {
-    		myFileSystem.bitMap[block] = 0; // Libera
-    		myFileSystem.nodes[idxNodo]->blocks[i] = 0;
+    		myFileSystem.bitMap[bloque] = 0;    //libera el bloque en el bitmap escribiendo un 0
+    		myFileSystem.nodes[node_id]->blocks[i] = 0;  //tambien lo quita de la lista de bloques del inodo
+    		myFileSystem.superBlock.numOfFreeBlocks++;  //aumenta el numero de bloques disponibles del super bloque
     	}
-        free (myFileSystem.nodes[idxNodo]);
-        
-        i++;
     }
-    
-    updateBitmap(&myFileSystem);    // Actualiza los datos
+
+    free (myFileSystem.nodes[node_id]);  //libera el espacio del inodo
+
+    //actualiza los cambios
+    updateBitmap(&myFileSystem);
+    updateDirectory(&myFileSystem);
+    updateNode(&myFileSystem, node_id, myFileSystem.nodes[node_id]);
     updateSuperBlock(&myFileSystem);
-    updateNode(&myFileSystem, idxNodo, myFileSystem.nodes[idxNodo]);
 
     return 0;
 }
 
-static int my_read(const char *path, const char *buf, size_t size, off_t offset, struct fuse_file_info *fi){    // Igual que write pero lee en vez de escribir
+//path: direccion del fichero a leer
+//buf: devuelve lo leido
+//size: tamano de lo que se quiere leer
+//offset: donde se comienza a leer
+//fi: contiene la informacion del fichero y obtener el numero de i-nodo
+static int my_read(const char *path, char *buf, size_t size, off_t offset, struct fuse_file_info *fi){
 
-   char buffer[BLOCK_SIZE_BYTES];
-    int bytes2Write = size, totalRead = 0;
-    NodeStruct *node = myFileSystem.nodes[fi->fh];
+    char buffer[BLOCK_SIZE_BYTES];  //buffer con el tamano de un bloque
+    int bytes2Read = size, totalRead = 0;   //indica los bytes que faltan por leer y los que hemos leido
+    NodeStruct *node = myFileSystem.nodes[fi->fh];  //guarda el numero de i-nodo asociado al fichero (fi->fh: numero del i-nodo)
 
-    fprintf(stderr, "--->>>my_write: path %s, size %zu, offset %jd, fh %"PRIu64"\n", path, size, (intmax_t)offset, fi->fh);
+    fprintf(stderr, "--->>>my_read: path %s, size %zu, offset %jd, fh %"PRIu64"\n", path, size, (intmax_t)offset, fi->fh);
 
-    // Increase the file size if it is needed
-    //if(resizeNode(fi->fh, size + offset) < 0)
-    //    return -EIO;
-    
-    while(bytes2Read) {
+    while(bytes2Read)   //continua mientras queden bytes por leer
+    {
         int i;
         int currentBlock, offBlock;
-        currentBlock = node->blocks[offset / BLOCK_SIZE_BYTES];
-        offBlock = offset % BLOCK_SIZE_BYTES;
 
-        if( readBlock(&myFileSystem, currentBlock, &buffer)==-1 ) { // Leer
+        currentBlock = node->blocks[offset / BLOCK_SIZE_BYTES]; //bloque actual que hay que leer
+        offBlock = offset % BLOCK_SIZE_BYTES;   //desplazamiento dentro del propio bloque
+
+        if( readBlock(&myFileSystem, currentBlock, &buffer)==-1 )   //lee el bloque y lo almacena en el buffer
+        {
             fprintf(stderr,"Error reading blocks in my_write\n");
             return -EIO;
         }
 
-        for(i = offBlock; (i < BLOCK_SIZE_BYTES) && (totalRead < size); i++) {
-            buffer[totalRead++] = buf[i];
+        for(i = offBlock; (i < BLOCK_SIZE_BYTES) && (totalRead < size); i++)    //copia lo leido y actualiza la variable totalRead hasta salirte del bloque o leer todo
+        {
+            buf[totalRead++] = buffer[i] ;
         }
 
-        if( writeBlock(&myFileSystem, currentBlock, &buffer)==-1 ) {
-            fprintf(stderr,"Error writing block in my_write\n");
-            return -EIO;
-        }
-
-        // Discount the read stuff
-        bytes2Write -= (i - offBlock);
-        offset += (i - offBlock);
+        bytes2Read -= (i - offBlock);   //actualiza lo que queda por leer
+        offset += (i - offBlock);       //actualiza el desplazamiento
     }
-    sync();
 
-    //node->modificationTime = time(NULL);
-    //updateSuperBlock(&myFileSystem);
-    //updateBitmap(&myFileSystem);
-    //updateNode(&myFileSystem, fi->fh, node);
+    while (totalRead < size)    //rellena con 0s hasta completar el tamano size
+    {
+        buf[totalRead++] = '0';
+    }
+
+    //actualiza los cambios
+    sync();
 
     return size;
 }
+
 
 struct fuse_operations myFS_operations = {
     .getattr	= my_getattr,					// Obtain attributes from a file
@@ -570,6 +570,5 @@ struct fuse_operations myFS_operations = {
     .release	= my_release,					// Close an opened file
     .mknod		= my_mknod,						// Create a new file
     .unlink		= my_unlink,                    // Delete a file
-    .read       = my_read                       // Read a file
+    .read       = my_read,                      // Read a file
 };
-
